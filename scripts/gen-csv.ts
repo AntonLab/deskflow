@@ -15,7 +15,6 @@ for (let i = 1; i <= rows; i++) {
   if (!stream.write(line)) await once(stream, 'drain');
 }
 
-
 stream.end();
 
 await once(stream, 'finish');
