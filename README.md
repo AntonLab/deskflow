@@ -1,6 +1,9 @@
 # DeskFlow
 
-Multi-tenant helpdesk with live chat. Demo/capstone project for a Middle Fullstack learning plan.
+Multi-tenant helpdesk with live chat: companies receive support requests as tickets,
+agents handle them in real time, and existing tickets can be bulk-imported from CSV.
+
+Work in progress.
 
 ## Idea
 
