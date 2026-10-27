@@ -5,10 +5,6 @@ agents handle them in real time, and existing tickets can be bulk-imported from 
 
 Work in progress.
 
-## Idea
-
-Companies (tenants) receive support requests as tickets. Agents handle tickets in real time, customers chat with agents live, and existing tickets can be bulk-imported from CSV.
-
 ## Planned features
 
 - Multi-tenancy: each company sees only its own data
