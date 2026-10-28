@@ -49,7 +49,47 @@ describe('importer server', () => {
     const { importId } = (await res.json()) as { importId: string };
     await expect
       .poll(async () => (await fetch(`${base}/imports/${importId}`)).json())
-      .toEqual({ importId, status: 'done', bytes: Buffer.byteLength(body) });
+      .toEqual({
+        importId,
+        status: 'done',
+        bytes: Buffer.byteLength(body),
+        processed: 0,
+        inserted: 0,
+      });
+  });
+
+  it('with a store, imports the rows and reports processed/inserted', async () => {
+    const inserted: string[] = [];
+    const withStore = createImporterServer({
+      async insertBatch(_id, rows) {
+        inserted.push(...rows.map((r) => r.subject));
+      },
+    });
+
+    await new Promise<void>((resolve) => withStore.listen(0, resolve));
+
+    const url = `http://127.0.0.1:${(withStore.address() as AddressInfo).port}`;
+    const csv =
+      'external_id,subject,description,requester_email,priority,status,created_at,tags\n' +
+      '1,Γειά,d,a@b.c,low,new,t,\n2,"a, b",d,a@b.c,low,new,t,\n';
+    const res = await fetch(`${url}/imports`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/csv' },
+      body: csv,
+    });
+    const { importId } = (await res.json()) as { importId: string };
+
+    await expect
+      .poll(
+        async () => ((await (await fetch(`${url}/imports/${importId}`)).json()) as { status: string }).status,
+      )
+      .toBe('done');
+
+    const state = await (await fetch(`${url}/imports/${importId}`)).json();
+
+    expect(state).toMatchObject({ processed: 2, inserted: 2 });
+    expect(inserted).toEqual(['Γειά', 'a, b']);
+    await new Promise<void>((resolve) => withStore.close(() => resolve()));
   });
 
   it('GET /imports/:id with unknown id returns 404', async () => {

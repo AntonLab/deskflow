@@ -1,4 +1,4 @@
-# Локальная инфраструктура. Сервисы приложений добавляются сюда в модуле 9 (дни 56–57).
+# Local infrastructure. Application services are added here in module 9 (days 56-57).
 name: deskflow
 
 services:
@@ -36,7 +36,7 @@ services:
       RABBITMQ_DEFAULT_PASS: deskflow
     ports:
       - '5672:5672'
-      - '15672:15672' # веб-консоль: http://localhost:15672
+      - '15672:15672' # web console: http://localhost:15672
     healthcheck:
       test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
       interval: 10s
