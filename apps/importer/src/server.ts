@@ -1,12 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server, type ServerResponse } from 'node:http';
-import { ensureUploadDir, receiveUpload } from './upload.ts';
+import { rm } from 'node:fs/promises';
+import type { TicketStore } from './db.ts';
+import { runImport } from './import-job.ts';
+import { ensureUploadDir, receiveUpload, uploadPath } from './upload.ts';
 
-type ImportStatus = 'receiving' | 'done' | 'failed';
+type ImportStatus = 'receiving' | 'importing' | 'done' | 'failed';
 
 interface ImportRecord {
   status: ImportStatus;
   bytes: number;
+  processed: number;
+  inserted: number;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -14,7 +19,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-export function createImporterServer(): Server {
+// Without a store the server only saves uploads to disk and skips the DB import.
+export function createImporterServer(store?: TicketStore): Server {
   ensureUploadDir();
 
   const imports = new Map<string, ImportRecord>();
@@ -29,10 +35,7 @@ export function createImporterServer(): Server {
     }
 
     if (req.method === 'POST' && path === '/imports') {
-      const type = (req.headers['content-type'] ?? '')
-        .split(';')[0]
-        ?.trim()
-        .toLowerCase();
+      const type = (req.headers['content-type'] ?? '').split(';')[0]?.trim().toLowerCase();
 
       if (type !== 'text/csv') {
         sendJson(res, 415, { error: 'unsupported_media_type' });
@@ -42,7 +45,7 @@ export function createImporterServer(): Server {
       }
 
       const id = randomUUID();
-      const record: ImportRecord = { status: 'receiving', bytes: 0 };
+      const record: ImportRecord = { status: 'receiving', bytes: 0, processed: 0, inserted: 0 };
 
       imports.set(id, record);
 
@@ -50,14 +53,24 @@ export function createImporterServer(): Server {
       receiveUpload(req, id, (bytes) => {
         record.bytes = bytes;
       })
-        .then(
-          () => {
-            record.status = 'done';
-          },
-          () => {
-            record.status = 'failed';
-          },
-        );
+        .then(async () => {
+          if (store) {
+            record.status = 'importing';
+
+            await runImport(uploadPath(id), id, store, ({ processed, inserted }) => {
+              record.processed = processed;
+              record.inserted = inserted;
+            });
+            await rm(uploadPath(id), { force: true });
+          }
+
+          record.status = 'done';
+        })
+        .catch((err: unknown) => {
+          console.error(`import ${id} failed`, err);
+
+          record.status = 'failed';
+        });
 
       return;
     }
@@ -68,7 +81,7 @@ export function createImporterServer(): Server {
       const record = imports.get(match[1]!);
 
       if (record) {
-        sendJson(res, 200, { importId: match[1], status: record.status, bytes: record.bytes });
+        sendJson(res, 200, { importId: match[1], ...record });
 
         return;
       }

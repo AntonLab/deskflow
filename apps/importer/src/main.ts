@@ -1,8 +1,14 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import pg from 'pg';
+import { createPgStore, ensureSchema } from './db.ts';
 import { createImporterServer } from './server.ts';
 
 const port = Number(process.env.IMPORTER_PORT ?? 4010);
-const server = createImporterServer();
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 5 });
+
+await ensureSchema(pool);
+
+const server = createImporterServer(createPgStore(pool));
 
 server.listen(port, () => {
   console.warn(`importer listening on http://localhost:${port}`);

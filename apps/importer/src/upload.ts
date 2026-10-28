@@ -5,6 +5,10 @@ import { pipeline } from 'node:stream/promises';
 
 const UPLOAD_DIR = join(tmpdir(), 'deskflow-imports');
 
+export function uploadPath(id: string): string {
+  return join(UPLOAD_DIR, `${id}.csv`);
+}
+
 // Create folder if not exist
 export function ensureUploadDir(): void {
   mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -17,6 +21,7 @@ export async function receiveUpload(
   onProgress: (bytes: number) => void,
 ): Promise<number> {
   let total = 0;
+
   await pipeline(
     req,
     async function* (source: AsyncIterable<Buffer>) {
@@ -26,7 +31,8 @@ export async function receiveUpload(
         yield chunk;
       }
     },
-    createWriteStream(join(UPLOAD_DIR, `${id}.csv`)),
+    createWriteStream(uploadPath(id)),
   );
+
   return total;
 }

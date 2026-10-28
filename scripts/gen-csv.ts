@@ -8,10 +8,10 @@ const rows = Number(process.argv[2] ?? 10_000_000);
 const out = process.argv[3] ?? join(tmpdir(), 'tickets.csv');
 const stream = createWriteStream(out);
 
-stream.write('id,subject,status,requester_email,created_at\n');
+stream.write('external_id,subject,description,requester_email,priority,status,created_at,tags\n');
 
 for (let i = 1; i <= rows; i++) {
-  const line = `${i},Ticket subject number ${i},open,user${i}@example.com,2024-01-01T00:00:00Z\n`;
+  const line = `${i},Ticket subject number ${i},"Description, with comma, for ticket ${i}",user${i}@example.com,normal,open,2024-01-01T00:00:00Z,billing;vip\n`;
   if (!stream.write(line)) await once(stream, 'drain');
 }
 
