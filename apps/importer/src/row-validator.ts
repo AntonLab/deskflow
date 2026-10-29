@@ -13,10 +13,12 @@ export class TooManyErrorsError extends Error {
 }
 
 // Streams errors to an NDJSON file, one `{ line, field, message }` per line. The file is created on the first error.
+// A write failure (disk full, folder gone) is kept and thrown by the next `add` or by `close`, so it fails the import.
 export class ErrorReport {
   /** Errors written so far. */
   count = 0;
   private out: WriteStream | null = null;
+  private failure: Error | null = null;
   private readonly path: string;
 
   constructor(path: string) {
@@ -24,7 +26,15 @@ export class ErrorReport {
   }
 
   async add(errors: RowError[]): Promise<void> {
-    this.out ??= createWriteStream(this.path);
+    if (this.failure) throw this.failure;
+
+    if (!this.out) {
+      this.out = createWriteStream(this.path);
+      this.out.on('error', (err) => {
+        this.failure = err;
+      });
+    }
+
     this.count += errors.length;
 
     if (!this.out.write(errors.map((e) => JSON.stringify(e) + '\n').join(''))) {
@@ -36,10 +46,14 @@ export class ErrorReport {
   async close(): Promise<void> {
     const out = this.out;
 
-    if (!out || out.destroyed) return;
+    if (!out) return;
 
-    out.end();
-    await once(out, 'close');
+    if (!out.destroyed) {
+      out.end();
+      await once(out, 'close').catch(() => {});
+    }
+
+    if (this.failure) throw this.failure;
   }
 }
 

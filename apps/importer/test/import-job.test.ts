@@ -5,9 +5,10 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Batcher } from '../src/batcher.ts';
-import { buildInsert, type TicketStore } from '../src/db.ts';
+import { buildInsert } from '../src/db.ts';
 import type { TicketRow } from '../src/csv-parser.ts';
 import { createDbWriter, type ImportProgress, runImport } from '../src/import-job.ts';
+import { fakeStore } from './fake-store.ts';
 
 const HEADER = 'external_id,subject,description,requester_email,priority,status,created_at,tags\n';
 
@@ -30,15 +31,16 @@ function row(i: number): TicketRow {
 
 describe('buildInsert', () => {
   it('builds one multi-row INSERT with numbered parameters', () => {
-    const { text, values } = buildInsert('imp', [row(1), row(2)]);
+    const { text, values } = buildInsert('acme', 'imp', [row(1), row(2)]);
 
     expect(text).toBe(
-      'INSERT INTO imported_tickets (import_id, external_id, subject, description, requester_email, priority, status, created_at, tags) ' +
-        'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9), ($10, $11, $12, $13, $14, $15, $16, $17, $18)',
+      'INSERT INTO imported_tickets (import_id, tenant_id, external_id, subject, description, requester_email, priority, status, created_at, tags) ' +
+        'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10), ($11, $12, $13, $14, $15, $16, $17, $18, $19, $20) ' +
+        'ON CONFLICT (tenant_id, external_id) DO NOTHING',
     );
-    expect(values).toHaveLength(18);
-    expect(values.slice(0, 3)).toEqual(['imp', '1', 's1']);
-    expect(values[9]).toBe('imp');
+    expect(values).toHaveLength(20);
+    expect(values.slice(0, 4)).toEqual(['imp', 'acme', '1', 's1']);
+    expect(values[10]).toBe('imp');
   });
 });
 
@@ -54,6 +56,22 @@ describe('Batcher', () => {
   });
 });
 
+describe('Batcher by weight', () => {
+  it('cuts a batch once its items are heavy enough, before the item count is reached', async () => {
+    const sizes: number[] = [];
+    const source = Readable.from(['aaaa', 'bbbb', 'cc', 'dddd', 'e']);
+
+    await pipeline(
+      source,
+      new Batcher<string>(100, (item) => item.length, 6),
+      async function (batches: AsyncIterable<string[]>) {
+        for await (const batch of batches) sizes.push(batch.length);
+      },
+    );
+    expect(sizes).toEqual([2, 2, 1]);
+  });
+});
+
 describe('backpressure', () => {
   it('stops reading while the store is slow, so memory stays bounded', async () => {
     const total = 20_000;
@@ -61,12 +79,10 @@ describe('backpressure', () => {
     let produced = 0;
     let inserted = 0;
     let maxAhead = 0;
-    const store: TicketStore = {
-      async insertBatch(_id, rows) {
-        await new Promise((resolve) => setTimeout(resolve, 2));
-        inserted += rows.length;
-      },
-    };
+    const store = fakeStore(async (_id, rows) => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inserted += rows.length;
+    });
     const source = Readable.from(
       (function* () {
         for (let i = 0; i < total; i++) {
@@ -104,11 +120,9 @@ describe('runImport', () => {
     writeFileSync(file, HEADER + lines.join('\n') + '\n');
 
     const batches: number[] = [];
-    const store: TicketStore = {
-      async insertBatch(_id, rows) {
-        batches.push(rows.length);
-      },
-    };
+    const store = fakeStore((_id, rows) => {
+      batches.push(rows.length);
+    });
     const seen: ImportProgress[] = [];
     const errors = join(dir, 'a.errors.ndjson');
     const result = await runImport(file, 'imp', store, (p) => seen.push(p), {
@@ -117,7 +131,7 @@ describe('runImport', () => {
     });
 
     expect(batches).toEqual([1000, 1000, 500]);
-    expect(result).toEqual({ processed: 2500, inserted: 2500, rejected: 0 });
+    expect(result).toEqual({ processed: 2500, inserted: 2500, rejected: 0, duplicates: 0 });
     expect(seen.at(-1)).toEqual(result);
     expect(existsSync(errors)).toBe(false);
   });
@@ -127,9 +141,7 @@ describe('runImport', () => {
 
     writeFileSync(file, HEADER + goodLine(1) + '\n');
 
-    const store: TicketStore = {
-      insertBatch: () => Promise.reject(new Error('db down')),
-    };
+    const store = fakeStore(() => Promise.reject(new Error('db down')));
 
     await expect(
       runImport(file, 'imp', store, () => {}, { errorsPath: join(dir, 'b.errors.ndjson') }),
@@ -147,16 +159,14 @@ describe('runImport', () => {
     writeFileSync(file, HEADER + lines.join('\n') + '\n');
 
     const inserted: string[] = [];
-    const store: TicketStore = {
-      async insertBatch(_id, rows) {
-        inserted.push(...rows.map((r) => r.external_id));
-      },
-    };
+    const store = fakeStore((_id, rows) => {
+      inserted.push(...rows.map((r) => r.external_id));
+    });
     const result = await runImport(file, 'imp', store, () => {}, { errorsPath: errors });
 
     expect(inserted).toHaveLength(997);
     expect(inserted).not.toContain('9');
-    expect(result).toEqual({ processed: 1000, inserted: 997, rejected: 3 });
+    expect(result).toEqual({ processed: 1000, inserted: 997, rejected: 3, duplicates: 0 });
 
     const report = readFileSync(errors, 'utf8')
       .trim()
@@ -177,11 +187,21 @@ describe('runImport', () => {
 
     writeFileSync(file, HEADER + lines.join('\n') + '\n');
 
-    const store: TicketStore = { insertBatch: () => Promise.resolve() };
+    const store = fakeStore();
 
     await expect(
       runImport(file, 'imp', store, () => {}, { errorsPath: join(dir, 'd.errors.ndjson'), maxErrors: 10 }),
     ).rejects.toThrow(/more than 10 invalid values/);
+  });
+
+  it('fails the import, and does not crash the process, when the error report cannot be written', async () => {
+    const file = join(dir, 'f.csv');
+
+    writeFileSync(file, HEADER + '1,,d,a@b.co,low,new,2024-01-01T00:00:00Z,\n' + goodLine(2) + '\n');
+
+    await expect(
+      runImport(file, 'imp', fakeStore(), () => {}, { errorsPath: join(dir, 'no-such-folder', 'f.ndjson') }),
+    ).rejects.toThrow(/ENOENT/);
   });
 
   it('stops when the signal aborts', async () => {
@@ -192,12 +212,10 @@ describe('runImport', () => {
     writeFileSync(file, HEADER + lines.join('\n') + '\n');
 
     let batches = 0;
-    const store: TicketStore = {
-      async insertBatch() {
-        batches++;
-        abort.abort();
-      },
-    };
+    const store = fakeStore(() => {
+      batches++;
+      abort.abort();
+    });
 
     await expect(
       runImport(file, 'imp', store, () => {}, {

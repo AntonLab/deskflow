@@ -41,6 +41,15 @@ describe('validateRow', () => {
     expect(result).toEqual({ errors: [{ line: 7, field, message: expect.any(String) }] });
   });
 
+  it('rejects a NUL character, which Postgres text cannot hold', () => {
+    expect(validateRow(2, { ...valid, subject: 'a\0b' })).toEqual({
+      errors: [{ line: 2, field: 'subject', message: 'contains a NUL character' }],
+    });
+    expect(validateRow(2, { ...valid, tags: 'x\0' })).toEqual({
+      errors: [{ line: 2, field: 'tags', message: 'contains a NUL character' }],
+    });
+  });
+
   it('reports every bad field of one row', () => {
     const result = validateRow(3, { ...valid, requester_email: '', priority: 'x' });
 

@@ -12,6 +12,8 @@ export interface ImportProgress {
   inserted: number;
   /** Rows skipped because they failed validation. */
   rejected: number;
+  /** Valid rows skipped because their `external_id` is already stored. */
+  duplicates: number;
 }
 
 export interface ImportOptions {
@@ -24,22 +26,31 @@ export interface ImportOptions {
 }
 
 // The callback fires only after the insert resolves, so a slow DB stalls the whole pipeline (backpressure).
+// A batch that finishes after the writer was destroyed is not counted; the caller waits for it before cleaning up.
 export function createDbWriter(
   store: TicketStore,
   importId: string,
-  onInserted: (count: number) => void,
+  onInserted: (inserted: number, batchSize: number) => void,
 ): Writable {
-  return new Writable({
+  const writer = new Writable({
     objectMode: true,
     highWaterMark: 1,
     write(batch: TicketRow[], _encoding, cb) {
-      store.insertBatch(importId, batch).then(() => {
-        onInserted(batch.length);
+      void store.insertBatch(importId, batch).then((inserted) => {
+        if (writer.destroyed) return;
+
+        onInserted(inserted, batch.length);
         cb();
       }, cb);
     },
   });
+
+  return writer;
 }
+
+// Text length stands in for bytes; it keeps a batch of long descriptions small.
+const rowWeight = (row: TicketRow): number =>
+  Object.values(row).reduce((sum, value) => sum + value.length, 0);
 
 export async function runImport(
   filePath: string,
@@ -51,7 +62,7 @@ export async function runImport(
   const parser = new CsvParser();
   const report = new ErrorReport(options.errorsPath);
   const validator = new RowValidator(report, options.maxErrors);
-  const progress: ImportProgress = { processed: 0, inserted: 0, rejected: 0 };
+  const progress: ImportProgress = { processed: 0, inserted: 0, rejected: 0, duplicates: 0 };
   const snapshot = (): ImportProgress => {
     progress.processed = parser.rows;
     progress.rejected = validator.rejected;
@@ -65,9 +76,10 @@ export async function runImport(
       new LineSplitter(),
       parser,
       validator,
-      new Batcher<TicketRow>(options.batchSize),
-      createDbWriter(store, importId, (count) => {
-        progress.inserted += count;
+      new Batcher<TicketRow>(options.batchSize, rowWeight),
+      createDbWriter(store, importId, (inserted, batchSize) => {
+        progress.inserted += inserted;
+        progress.duplicates += batchSize - inserted;
         onProgress(snapshot());
       }),
       { signal: options.signal },

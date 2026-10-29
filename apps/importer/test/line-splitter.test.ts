@@ -38,6 +38,12 @@ describe('LineSplitter', () => {
     expect(await split([Buffer.from('﻿a\nb\n')])).toEqual(['a', 'b']);
   });
 
+  it('fails on a line longer than the limit instead of buffering it', async () => {
+    const chunk = Buffer.alloc(65_536, 97);
+
+    await expect(split(Array(20).fill(chunk))).rejects.toThrow(/line is longer than/);
+  });
+
   it('keeps empty lines', async () => {
     expect(await split([Buffer.from('a\n\nb\n')])).toEqual(['a', '', 'b']);
   });

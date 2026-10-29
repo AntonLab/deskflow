@@ -69,6 +69,54 @@ describe('CsvParser', () => {
     await expect(parse(['id,subject', '1,s'])).rejects.toThrow(/unexpected CSV header/);
   });
 
+  it('fails fast on a stray quote instead of buffering the rest of the file', async () => {
+    const lines = [HEADER, '1,"never closed,d,a@b.co,low,new,2024-01-01T00:00:00Z,'];
+
+    for (let i = 2; i < 40_000; i++)
+      lines.push(`${i},subject ${'x'.repeat(60)},d,a@b.co,low,new,2024-01-01T00:00:00Z,`);
+
+    const t0 = Date.now();
+
+    await expect(parse(lines)).rejects.toThrow(/longer than/);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('treats a quote inside an unquoted value as text and keeps the following rows apart', async () => {
+    const rows = await parse([
+      HEADER,
+      '1,Screen 5" wide,d,a@b.co,low,new,2024-01-01T00:00:00Z,',
+      '2,B,d,b@b.co,low,new,2024-01-01T00:00:00Z,',
+      '3,Say "hi" now",d,c@b.co,low,new,2024-01-01T00:00:00Z,',
+      '4,"quoted, ""ok""",d,d@b.co,low,new,2024-01-01T00:00:00Z,',
+    ]);
+
+    expect(rows.map((r) => [r.line, r.row.subject])).toEqual([
+      [2, 'Screen 5" wide'],
+      [3, 'B'],
+      [4, 'Say "hi" now"'],
+      [5, 'quoted, "ok"'],
+    ]);
+  });
+
+  it('joins a long quoted field in linear time', async () => {
+    const lines = [HEADER, '1,s,"start'];
+
+    for (let i = 0; i < 20_000; i++) lines.push(`line ${i} of the description`);
+
+    lines.push('end",a@b.co,low,new,2024-01-01T00:00:00Z,');
+
+    const t0 = Date.now();
+    const rows = await parse(lines);
+
+    expect(rows).toHaveLength(1);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('rejects a file without a header', async () => {
+    await expect(parse([])).rejects.toThrow(/no header/);
+    await expect(parse(['', ''])).rejects.toThrow(/no header/);
+  });
+
   it('rejects an unterminated quoted field', async () => {
     await expect(parse([HEADER, '1,"oops'])).rejects.toThrow(/unterminated/);
   });
