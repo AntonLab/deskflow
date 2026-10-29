@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.12"
+    "node": ">=22.18"
   },
   "scripts": {
     "dev": "turbo run dev",
