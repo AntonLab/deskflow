@@ -13,6 +13,12 @@ export const CSV_COLUMNS = [
 
 export type TicketRow = Record<(typeof CSV_COLUMNS)[number], string>;
 
+/** A parsed row with the 1-based file line it starts on (the header is line 1). */
+export interface NumberedRow {
+  line: number;
+  row: TicketRow;
+}
+
 function splitFields(record: string): string[] {
   if (!record.includes('"')) return record.split(',');
 
@@ -49,11 +55,13 @@ function splitFields(record: string): string[] {
 }
 
 // Lines in, ticket rows out. A quoted field may span lines, so lines are joined until quotes balance.
-// Field validation is out of scope (DF-003): a short row gets empty strings, extra fields are dropped.
+// Field validation lives in RowValidator: a short row gets empty strings, extra fields are dropped.
 export class CsvParser extends Transform {
   /** Rows parsed so far, header excluded. */
   rows = 0;
   private pending: string | null = null;
+  private lineNo = 0;
+  private recordLine = 0;
   private headerSeen = false;
 
   constructor() {
@@ -61,6 +69,10 @@ export class CsvParser extends Transform {
   }
 
   override _transform(line: string, _encoding: BufferEncoding, cb: TransformCallback): void {
+    this.lineNo++;
+
+    if (this.pending === null) this.recordLine = this.lineNo;
+
     const record = this.pending === null ? line : `${this.pending}\n${line}`;
 
     if (countQuotes(record) % 2 === 1) {
@@ -102,7 +114,7 @@ export class CsvParser extends Transform {
 
     this.rows++;
 
-    cb(null, row);
+    cb(null, { line: this.recordLine, row } satisfies NumberedRow);
   }
 
   override _flush(cb: TransformCallback): void {

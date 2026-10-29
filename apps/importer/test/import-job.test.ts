@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -7,9 +7,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Batcher } from '../src/batcher.ts';
 import { buildInsert, type TicketStore } from '../src/db.ts';
 import type { TicketRow } from '../src/csv-parser.ts';
-import { createDbWriter, runImport } from '../src/import-job.ts';
+import { createDbWriter, type ImportProgress, runImport } from '../src/import-job.ts';
 
 const HEADER = 'external_id,subject,description,requester_email,priority,status,created_at,tags\n';
+
+function goodLine(i: number): string {
+  return `${i},Ticket ${i},d,a@b.co,low,new,2024-01-01T00:00:00Z,`;
+}
 
 function row(i: number): TicketRow {
   return {
@@ -95,7 +99,7 @@ describe('runImport', () => {
 
   it('inserts every row in batches and reports progress', async () => {
     const file = join(dir, 'a.csv');
-    const lines = Array.from({ length: 2500 }, (_, i) => `${i},Ticket ${i},d,a@b.c,low,new,t,`);
+    const lines = Array.from({ length: 2500 }, (_, i) => goodLine(i));
 
     writeFileSync(file, HEADER + lines.join('\n') + '\n');
 
@@ -105,23 +109,103 @@ describe('runImport', () => {
         batches.push(rows.length);
       },
     };
-    const seen: { processed: number; inserted: number }[] = [];
-    const result = await runImport(file, 'imp', store, (p) => seen.push(p), 1000);
+    const seen: ImportProgress[] = [];
+    const errors = join(dir, 'a.errors.ndjson');
+    const result = await runImport(file, 'imp', store, (p) => seen.push(p), {
+      batchSize: 1000,
+      errorsPath: errors,
+    });
 
     expect(batches).toEqual([1000, 1000, 500]);
-    expect(result).toEqual({ processed: 2500, inserted: 2500 });
-    expect(seen.at(-1)).toEqual({ processed: 2500, inserted: 2500 });
+    expect(result).toEqual({ processed: 2500, inserted: 2500, rejected: 0 });
+    expect(seen.at(-1)).toEqual(result);
+    expect(existsSync(errors)).toBe(false);
   });
 
   it('rejects when an insert fails', async () => {
     const file = join(dir, 'b.csv');
 
-    writeFileSync(file, HEADER + '1,s,d,e,p,s,t,\n');
+    writeFileSync(file, HEADER + goodLine(1) + '\n');
 
     const store: TicketStore = {
       insertBatch: () => Promise.reject(new Error('db down')),
     };
 
-    await expect(runImport(file, 'imp', store, () => {})).rejects.toThrow('db down');
+    await expect(
+      runImport(file, 'imp', store, () => {}, { errorsPath: join(dir, 'b.errors.ndjson') }),
+    ).rejects.toThrow('db down');
+  });
+
+  it('skips invalid rows and reports each with its line and field', async () => {
+    const file = join(dir, 'c.csv');
+    const errors = join(dir, 'c.errors.ndjson');
+    const lines = Array.from({ length: 1000 }, (_, i) => goodLine(i));
+
+    lines[9] = '9,s,d,,low,new,2024-01-01T00:00:00Z,'; // line 11: empty email
+    lines[499] = '499,s,d,a@b.co,asap,new,2024-01-01T00:00:00Z,'; // line 501: unknown priority
+    lines[999] = '999,s,d,a@b.co,low,new,yesterday,'; // line 1001: broken date
+    writeFileSync(file, HEADER + lines.join('\n') + '\n');
+
+    const inserted: string[] = [];
+    const store: TicketStore = {
+      async insertBatch(_id, rows) {
+        inserted.push(...rows.map((r) => r.external_id));
+      },
+    };
+    const result = await runImport(file, 'imp', store, () => {}, { errorsPath: errors });
+
+    expect(inserted).toHaveLength(997);
+    expect(inserted).not.toContain('9');
+    expect(result).toEqual({ processed: 1000, inserted: 997, rejected: 3 });
+
+    const report = readFileSync(errors, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { line: number; field: string; message: string });
+
+    expect(report.map(({ line, field }) => ({ line, field }))).toEqual([
+      { line: 11, field: 'requester_email' },
+      { line: 501, field: 'priority' },
+      { line: 1001, field: 'created_at' },
+    ]);
+    expect(report[1]?.message).toMatch(/must be one of/);
+  });
+
+  it('fails once the error limit is exceeded', async () => {
+    const file = join(dir, 'd.csv');
+    const lines = Array.from({ length: 50 }, (_, i) => `${i},,d,a@b.c,low,new,2024-01-01T00:00:00Z,`);
+
+    writeFileSync(file, HEADER + lines.join('\n') + '\n');
+
+    const store: TicketStore = { insertBatch: () => Promise.resolve() };
+
+    await expect(
+      runImport(file, 'imp', store, () => {}, { errorsPath: join(dir, 'd.errors.ndjson'), maxErrors: 10 }),
+    ).rejects.toThrow(/more than 10 invalid values/);
+  });
+
+  it('stops when the signal aborts', async () => {
+    const file = join(dir, 'e.csv');
+    const abort = new AbortController();
+    const lines = Array.from({ length: 5000 }, (_, i) => goodLine(i));
+
+    writeFileSync(file, HEADER + lines.join('\n') + '\n');
+
+    let batches = 0;
+    const store: TicketStore = {
+      async insertBatch() {
+        batches++;
+        abort.abort();
+      },
+    };
+
+    await expect(
+      runImport(file, 'imp', store, () => {}, {
+        batchSize: 100,
+        errorsPath: join(dir, 'e.errors.ndjson'),
+        signal: abort.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(batches).toBe(1);
   });
 });
